@@ -1,0 +1,192 @@
+* Controlando o robo pelo celular usando a rede Wi-Fi da Vespa.
+* Monitorando a distancia entre o robo e os obstaculos pela mesma pagina web
+* usando o sensor ultrassonico do conjunto.
+*******************************************************************************
+
+
+
+#include <esp_arduino_version.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
+#include <RoboCore_Vespa.h>
+
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+const uint8_t PINO_LED = 15;
+const uint8_t PINO_HCSR04_ECHO = 26;
+const uint8_t PINO_HCSR04_TRIGGER = 25;
+
+const char *ALIAS_ANGULO = "angulo";
+const char *ALIAS_DISTANCIA = "distancia";
+const char *ALIAS_VELOCIDADE = "velocidade";
+const char *ALIAS_VBAT = "vbat";
+
+VespaMotors motores;
+VespaBattery vbat;
+
+const uint32_t TEMPO_ATUALIZACAO_VBAT = 5000;
+uint32_t timeout_vbat;
+
+const uint32_t TEMPO_ATUALIZACAO_DISTANCIA = 100;
+uint32_t timeout_distancia;
+
+uint32_t distancia;
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<title>RoboCore Joystick</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=0">
+</head>
+<body>
+</body>
+</html>
+)rawliteral";
+
+void configurar_servidor_web(void);
+void handleWebSocketMessage(void *, uint8_t *, size_t);
+int16_t ler_distancia(void);
+void onEvent(AsyncWebSocket *, AsyncWebSocketClient *, AwsEventType, void *, uint8_t *, size_t);
+
+void setup(){
+  Serial.begin(115200);
+
+  pinMode(PINO_LED, OUTPUT);
+  digitalWrite(PINO_LED, LOW);
+
+  pinMode(PINO_HCSR04_ECHO, INPUT);
+  pinMode(PINO_HCSR04_TRIGGER, OUTPUT);
+  digitalWrite(PINO_HCSR04_TRIGGER, LOW);
+
+  WiFi.mode(WIFI_AP);
+
+#if ESP_ARDUINO_VERSION_MAJOR > 2
+  WiFi.softAPdisconnect();
+  delay(100);
+  WiFi.softAP("Vespa", "12345");
+  const char *mac = WiFi.softAPmacAddress().c_str();
+#else
+  const char *mac = WiFi.macAddress().c_str();
+#endif
+
+  char ssid[] = "Vespa-xxxxx";
+  char *senha = "robocore";
+
+  for(uint8_t i = 6; i < 11; i++){
+    ssid[i] = mac[i + 6];
+  }
+
+  if(!WiFi.softAP(ssid, senha)){
+    while(1){
+      digitalWrite(PINO_LED, HIGH);
+      delay(100);
+      digitalWrite(PINO_LED, LOW);
+      delay(100);
+    }
+  }
+
+  configurar_servidor_web();
+  server.begin();
+}
+
+void loop() {
+  if(millis() > timeout_vbat){
+    if(ws.count() > 0){
+      uint32_t tensao = vbat.readVoltage();
+
+      StaticJsonDocument<JSON_OBJECT_SIZE(1)> json;
+      json[ALIAS_VBAT] = tensao;
+
+      char mensagem[32];
+      size_t len = serializeJson(json, mensagem);
+      ws.textAll(mensagem, len);
+    }
+    timeout_vbat = millis() + TEMPO_ATUALIZACAO_VBAT;
+  }
+
+  if(millis() > timeout_distancia){
+    if(ws.count() > 0){
+      float fator = 0.2;
+      float leitura = ler_distancia();
+      distancia = leitura * fator + (1.0 - fator) * distancia;
+
+      StaticJsonDocument<JSON_OBJECT_SIZE(1)> json;
+      json[ALIAS_DISTANCIA] = distancia;
+
+      char mensagem[32];
+      size_t len = serializeJson(json, mensagem);
+      ws.textAll(mensagem, len);
+    }
+    timeout_distancia = millis() + TEMPO_ATUALIZACAO_DISTANCIA;
+  }
+}
+
+void configurar_servidor_web(void) {
+  ws.onEvent(onEvent);
+  server.addHandler(&ws);
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html);
+  });
+}
+
+void handleWebSocketMessage(void *arg, uint8_t *data, size_t length) {
+  AwsFrameInfo *info = (AwsFrameInfo*)arg;
+
+  if (info->final && info->index == 0 && info->len == length && info->opcode == WS_TEXT) {
+    data[length] = 0;
+
+    if(strstr((char*)data, ALIAS_VELOCIDADE)){
+      StaticJsonDocument<JSON_OBJECT_SIZE(2)> json;
+      deserializeJson(json, data, length);
+
+      int16_t angulo = json[ALIAS_ANGULO];
+      int16_t velocidade = json[ALIAS_VELOCIDADE];
+
+      if((angulo >= 90) && (angulo <= 180)){
+        motores.turn(velocidade * (135 - angulo) / 45 , velocidade);
+      }
+      else if((angulo >= 0) && (angulo < 90)){
+        motores.turn(velocidade, velocidade * (angulo - 45) / 45);
+      }
+      else if((angulo > 180) && (angulo <= 270)){
+        motores.turn(-velocidade, -velocidade * (angulo - 225) / 45);
+      }
+      else if(angulo > 270){
+        motores.turn(-velocidade * (315 - angulo) / 45, -velocidade);
+      }
+      else {
+        motores.stop();
+      }
+    }
+  }
+}
+
+int16_t ler_distancia(void){
+  digitalWrite(PINO_HCSR04_TRIGGER, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(PINO_HCSR04_TRIGGER, LOW);
+  return pulseIn(PINO_HCSR04_ECHO, HIGH) / 58;
+}
+
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
+             void *arg, uint8_t *data, size_t length) {
+  if(type == WS_EVT_CONNECT){
+    digitalWrite(PINO_LED, HIGH);
+    if(ws.count() > 1){
+      ws.close(client->id());
+    }
+  }
+  else if(type == WS_EVT_DISCONNECT){
+    if(ws.count() == 0){
+      digitalWrite(PINO_LED, LOW);
+    }
+  }
+  else if(type == WS_EVT_DATA){
+    handleWebSocketMessage(arg, data, length);
+  }
+}
