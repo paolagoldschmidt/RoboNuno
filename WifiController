@@ -1,0 +1,302 @@
+* Monte um circuito com a fita isolante preta 
+* em uma superficie branca e coloque o robo sobre a linha
+* desta pista. O robo ira andar sempre sobre a linha, e, caso
+* ele saia da pista, ele se mantera parado.
+
+* Apos ligar a Vespa, conecte o seu celular a rede dela e
+* acesse o endereco de IP 198.164.4.1. Sera aberta a pagina 
+* de edicao do parametros do calculo PID. Para altera-los, 
+* pressione o botao editar. Neste momento, o robo ira parar
+* e os campos de edicao serao habilitados. Apos editar os 
+* valores, pressione o botao salvar, que o robo ja partira
+* usando os parametros alterados para o calculo PID.
+*************************************************************/
+
+#include <esp_arduino_version.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
+#include <RoboCore_Vespa.h>
+
+VespaMotors motores;
+
+VespaBattery vbat;
+const uint32_t TEMPO_ATUALIZACAO_VBAT = 5000;
+uint32_t timeout_vbat;
+
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+const uint8_t PINO_LED = 15;
+
+const char *ALIAS_ESPERA = "pausa";
+const char *ALIAS_KP = "kp";
+const char *ALIAS_KI = "ki";
+const char *ALIAS_KD = "kd";
+const char *ALIAS_VBAT = "vbat";
+const char *ALIAS_PARA = "stop";
+
+const int SENSOR_LINHA_ESQUERDO = 36;
+const int SENSOR_LINHA_DIREITO = 39;
+
+int leitura_esquerdo = 0;
+int leitura_direito = 0;
+
+const int LEITURA_LINHA = 3000;
+const int VELOCIDADE = 70;
+const int VELOCIDADE_MAXIMA = 100;
+const int VELOCIDADE_MINIMA = 0;
+
+int velocidade_direita;
+int velocidade_esquerda;
+
+const int CONTAGEM_MAXIMA = 2500;
+int contador_parada = 0;
+
+float espera;
+float Kp;
+float Ki;
+float Kd;
+
+float erro = 0.0;
+float P = 0.0;
+float I = 0.0;
+float D = 0.0;
+float erro_anterior = 0.0;
+float resposta_PID = 0.0;
+
+bool parada = true;
+
+Preferences SPIFFS;
+
+const char* DIRETORIO_SPIFFS = "seguidor";
+const char* ENDERECOS_SPIFFS[4] = {"espera", "Kp", "Ki", "Kd"};
+const float VALORES_PADROES[4] = {10.0, 6.0, 0.20, 20.0};
+
+void calcula_PID(void);
+void segue_linha(void);
+void configurar_servidor_web(void);
+void handleWebSocketMessage(void *, uint8_t *, size_t);
+void onEvent(AsyncWebSocket *, AsyncWebSocketClient *, AwsEventType, void *, uint8_t *, size_t);
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<title>RoboCore Joystick</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=0">
+<style>
+html, body {width: 100%; height: 100%; padding: 0; margin: 0;}
+body {overflow: hidden;}
+.container {height: 26px; width: 50px; position: relative;}
+.container * {position: absolute;}
+.battery {top: 50%; left: 50%; transform: translate(-50%, -50%); height: 20px; width: 40px; border: 2px solid #F1F1F1; border-radius: 5px; padding: 1px;}
+.battery::before {content: ''; position: absolute; height: 13px; width: 3px; background: #F1F1F1; left: 44px; top: 50%; transform: translateY(-50%); border-radius: 0 3px 3px 0;}
+.part {background: #0F0; top: 1px; left: 1px; bottom: 1px; border-radius: 3px;}
+.input-group {display: table; width: 100%; margin-bottom: 20px;}
+.input-group-addon {width: 50px; padding: 6px 12px; font-size: 14px; color: #555; text-align: center; background-color: #eee; border: 1px solid #ccc; display: table-cell;}
+.input {display: table-cell; font-size: 18px; height: 34px; padding: 6px 12px; border: 1px solid #ccc;}
+.disabled {background-color: #eee;}
+.btn {font-size: 18px; color: #fff; width: 100%; height: 48px; border-radius: 4px;}
+.btn-warning {background-color: #f0be00;}
+</style>
+</head>
+<body>
+<script>
+var connection = new WebSocket(`ws://${window.location.hostname}/ws`);
+connection.onmessage = function (e) {
+    const data = JSON.parse(e.data);
+    if (data["vbat"]) {
+        document.getElementById("vbat").innerText = (data["vbat"] / 1000).toFixed(1);
+    }
+};
+function send_pid() {
+    var data = {
+        kp: parseFloat(document.getElementById("kp").value),
+        ki: parseFloat(document.getElementById("ki").value),
+        kd: parseFloat(document.getElementById("kd").value),
+        pausa: parseFloat(document.getElementById("pausa").value)
+    };
+    connection.send(JSON.stringify(data));
+}
+function stop_robot() {
+    connection.send(JSON.stringify({stop: 1}));
+}
+</script>
+</body>
+</html>
+)rawliteral";
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+
+  pinMode(SENSOR_LINHA_ESQUERDO, INPUT);
+  pinMode(SENSOR_LINHA_DIREITO, INPUT);
+
+  pinMode(PINO_LED, OUTPUT);
+  digitalWrite(PINO_LED, LOW);
+
+  WiFi.mode(WIFI_AP);
+
+#if ESP_ARDUINO_VERSION_MAJOR > 2
+  WiFi.softAPdisconnect();
+  delay(100);
+  WiFi.softAP("Vespa", "12345");
+  const char *mac = WiFi.softAPmacAddress().c_str();
+#else
+  const char *mac = WiFi.macAddress().c_str();
+#endif
+
+  char ssid[] = "Vespa-xxxxx";
+  char *senha = "robocore";
+
+  for(uint8_t i=6 ; i < 11 ; i++){
+    ssid[i] = mac[i+6];
+  }
+
+  if(!WiFi.softAP(ssid, senha)){
+    while(1){
+      digitalWrite(PINO_LED, HIGH);
+      delay(100);
+      digitalWrite(PINO_LED, LOW);
+      delay(100);
+    }
+  }
+
+  configurar_servidor_web();
+  server.begin();
+
+  SPIFFS.begin(DIRETORIO_SPIFFS, false);
+  espera = SPIFFS.getFloat(ENDERECOS_SPIFFS[0], VALORES_PADROES[0]);
+  Kp = SPIFFS.getFloat(ENDERECOS_SPIFFS[1], VALORES_PADROES[1]);
+  Ki = SPIFFS.getFloat(ENDERECOS_SPIFFS[2], VALORES_PADROES[2]);
+  Kd = SPIFFS.getFloat(ENDERECOS_SPIFFS[3], VALORES_PADROES[3]);
+  SPIFFS.end();
+}
+
+void loop() {
+  if(millis() > timeout_vbat){
+    if(ws.count() > 0){
+      uint32_t tensao = vbat.readVoltage();
+      StaticJsonDocument<JSON_OBJECT_SIZE(1)> json;
+      json[ALIAS_VBAT] = tensao;
+      char mensagem[32];
+      size_t len = serializeJson(json, mensagem);
+      ws.textAll(mensagem, len);
+    }
+    timeout_vbat = millis() + TEMPO_ATUALIZACAO_VBAT;
+  }
+
+  if (!parada) {
+    segue_linha();
+  }
+}
+
+void segue_linha() {
+  leitura_esquerdo = analogRead(SENSOR_LINHA_ESQUERDO);
+  leitura_direito = analogRead(SENSOR_LINHA_DIREITO);
+
+  if (leitura_esquerdo > LEITURA_LINHA && leitura_direito > LEITURA_LINHA) {
+    erro = 0.0;
+    calcula_PID();
+    motores.turn(velocidade_direita, velocidade_esquerda);
+    contador_parada = 0;
+  }
+  else if (leitura_esquerdo < LEITURA_LINHA && leitura_direito < LEITURA_LINHA) {
+    contador_parada++;
+    if (erro == 1.0) erro = 2.0;
+    else if (erro == -1.0) erro = -2.0;
+    calcula_PID();
+    motores.turn(velocidade_direita, velocidade_esquerda);
+  }
+  else if (leitura_direito > LEITURA_LINHA) {
+    erro = 1.0;
+    calcula_PID();
+    motores.turn(velocidade_direita, velocidade_esquerda);
+    contador_parada = 0;
+  }
+  else if (leitura_esquerdo > LEITURA_LINHA) {
+    erro = -1.0;
+    calcula_PID();
+    motores.turn(velocidade_direita, velocidade_esquerda);
+    contador_parada = 0;
+  }
+
+  if (contador_parada >= CONTAGEM_MAXIMA) {
+    motores.stop();
+    P = I = D = 0;
+    contador_parada = CONTAGEM_MAXIMA;
+  }
+
+  delay(espera);
+}
+
+void calcula_PID() {
+  P = erro;
+  I += erro;
+  D = erro - erro_anterior;
+  resposta_PID = (Kp * P) + (Ki * I) + (Kd * D);
+  erro_anterior = erro;
+
+  velocidade_direita = VELOCIDADE + resposta_PID;
+  velocidade_esquerda = VELOCIDADE - resposta_PID;
+
+  velocidade_direita = constrain(velocidade_direita, VELOCIDADE_MINIMA, VELOCIDADE_MAXIMA);
+  velocidade_esquerda = constrain(velocidade_esquerda, VELOCIDADE_MINIMA, VELOCIDADE_MAXIMA);
+}
+
+void configurar_servidor_web(void) {
+  ws.onEvent(onEvent);
+  server.addHandler(&ws);
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
+    request->send_P(200, "text/html", index_html);
+  });
+}
+
+void handleWebSocketMessage(void *arg, uint8_t *data, size_t length) {
+  AwsFrameInfo *info = (AwsFrameInfo*)arg;
+  if (info->final && info->index == 0 && info->len == length && info->opcode == WS_TEXT) {
+    data[length] = 0;
+
+    if (strstr((char*)data, ALIAS_PARA)) {
+      motores.stop();
+      P = I = D = 0;
+      contador_parada = 0;
+      parada = true;
+    }
+    else if (strstr((char*)data, ALIAS_KP)) {
+      StaticJsonDocument<JSON_OBJECT_SIZE(4)> json;
+      deserializeJson(json, data, length);
+
+      parada = false;
+      espera = json[ALIAS_ESPERA];
+      Kp = json[ALIAS_KP];
+      Ki = json[ALIAS_KI];
+      Kd = json[ALIAS_KD];
+
+      SPIFFS.begin(DIRETORIO_SPIFFS, false);
+      SPIFFS.putFloat(ENDERECOS_SPIFFS[0], espera);
+      SPIFFS.putFloat(ENDERECOS_SPIFFS[1], Kp);
+      SPIFFS.putFloat(ENDERECOS_SPIFFS[2], Ki);
+      SPIFFS.putFloat(ENDERECOS_SPIFFS[3], Kd);
+      SPIFFS.end();
+    }
+  }
+}
+
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t length) {
+  if (type == WS_EVT_CONNECT) {
+    digitalWrite(PINO_LED, HIGH);
+    if (ws.count() > 1) ws.close(client->id());
+  }
+  else if (type == WS_EVT_DISCONNECT) {
+    if (ws.count() == 0) digitalWrite(PINO_LED, LOW);
+  }
+  else if (type == WS_EVT_DATA) {
+    handleWebSocketMessage(arg, data, length);
+  }
+}
