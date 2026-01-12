@@ -1,0 +1,246 @@
+#include <esp_arduino_version.h>
+#include <WiFi.h>
+#include <ArduinoJson.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <RoboCore_Vespa.h>
+
+struct servo_angulos_t {
+  uint8_t min;
+  uint8_t max;
+  uint8_t atual;
+};
+
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+const uint8_t PIN_LED = 15;
+
+const char *ALIAS_ANGULO = "angulo";
+const char *ALIAS_POSICAO = "posicao";
+const char *ALIAS_SERVO = "servo";
+const char *ALIAS_VELOCIDADE = "velocidade";
+const char *ALIAS_VBAT = "vbat";
+
+VespaMotors motores;
+VespaServo servos[4];
+
+const uint16_t SERVO_MAX = 2500;
+const uint16_t SERVO_MIN = 500;
+
+enum Motor { Base = 0 , Alcance , Elevacao , Garra };
+
+servo_angulos_t sangulos[4] = {
+  { 0, 180, 120 },
+  { 0, 180, 140 },
+  { 0, 180, 90  },
+  { 0, 180, 90  }
+};
+
+VespaBattery vbat;
+uint8_t vbat_critico = 0xFF;
+
+const uint32_t INTERVALO_ATUALIZACAO_VBAT = 5000;
+const uint32_t INTERVALO_ATUALIZACAO_DESCONEXAO = 100;
+const uint32_t INTERVALO_LED_VBAT_HIGH = 1000;
+const uint32_t INTERVALO_LED_VBAT_LOW = 500;
+
+uint32_t timeout_vbat;
+uint32_t timeout_desconexao;
+uint32_t timeout_led_vbat;
+
+bool habilitar_reset_motores = true;
+
+const char html_index[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<title>RoboCore Joystick + RoboARM</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=0">
+</head>
+<body>
+</body>
+</html>
+)rawliteral";
+
+const char html_busy[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<title>RoboCore Joystick</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+</head>
+<body>
+<div style="padding: 10px; background-color: yellow; text-align: center;">
+Outro usuário já está conectado neste robô
+</div>
+</body>
+</html>
+)rawliteral";
+
+void configurar_servidor_web(void);
+void handleWebSocketMessage(uint32_t, void *, uint8_t *, size_t);
+void onEvent(AsyncWebSocket *, AsyncWebSocketClient *, AwsEventType, void *, uint8_t *, size_t);
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, LOW);
+
+  servos[0].attach(VESPA_SERVO_S1, SERVO_MIN, SERVO_MAX);
+  servos[1].attach(VESPA_SERVO_S2, SERVO_MIN, SERVO_MAX);
+  servos[2].attach(VESPA_SERVO_S3, SERVO_MIN, SERVO_MAX);
+  servos[3].attach(VESPA_SERVO_S4, SERVO_MIN, SERVO_MAX);
+
+  for(uint8_t i = 0; i < 4; i++){
+    servos[i].write(sangulos[i].atual);
+  }
+
+  WiFi.mode(WIFI_AP);
+
+#if ESP_ARDUINO_VERSION_MAJOR > 2
+  WiFi.softAPdisconnect();
+  delay(100);
+  WiFi.softAP("Vespa", "12345");
+  const char *mac = WiFi.softAPmacAddress().c_str();
+#else
+  const char *mac = WiFi.macAddress().c_str();
+#endif
+
+  char ssid[] = "Vespa-xxxxx";
+  char *senha = "robocore";
+
+  for(uint8_t i = 6; i < 11; i++){
+    ssid[i] = mac[i + 6];
+  }
+
+  if(!WiFi.softAP(ssid, senha)){
+    while(1){
+      digitalWrite(PIN_LED, HIGH);
+      delay(100);
+      digitalWrite(PIN_LED, LOW);
+      delay(100);
+    }
+  }
+
+  configurar_servidor_web();
+  server.begin();
+}
+
+void loop() {
+  if(millis() > timeout_vbat){
+    uint32_t tensao = vbat.readVoltage();
+
+    if((tensao < 7000) && (vbat_critico == 0xFF)){
+      vbat_critico = LOW;
+      digitalWrite(PIN_LED, vbat_critico);
+      timeout_led_vbat = millis() + INTERVALO_LED_VBAT_LOW;
+    } 
+    else if((tensao >= 7000) && (vbat_critico < 0xFF)){
+      vbat_critico = 0xFF;
+      digitalWrite(PIN_LED, ws.count() > 0 ? HIGH : LOW);
+    }
+
+    if(ws.count() > 0){
+      StaticJsonDocument<JSON_OBJECT_SIZE(1)> json;
+      json[ALIAS_VBAT] = tensao;
+
+      char msg[32];
+      size_t len = serializeJson(json, msg);
+      ws.textAll(msg, len);
+    }
+
+    timeout_vbat = millis() + INTERVALO_ATUALIZACAO_VBAT;
+  }
+
+  if(millis() > timeout_led_vbat && vbat_critico < 0xFF){
+    vbat_critico = !vbat_critico;
+    digitalWrite(PIN_LED, vbat_critico);
+    timeout_led_vbat = millis() + (vbat_critico ? INTERVALO_LED_VBAT_HIGH : INTERVALO_LED_VBAT_LOW);
+  }
+
+  if(millis() > timeout_desconexao){
+    if(ws.count() == 0 && habilitar_reset_motores){
+      motores.stop();
+      for(uint8_t i = 0; i < 4; i++){
+        servos[i].write(sangulos[i].atual);
+      }
+      habilitar_reset_motores = false;
+    }
+    timeout_desconexao = millis() + INTERVALO_ATUALIZACAO_DESCONEXAO;
+  }
+}
+
+void configurar_servidor_web(void) {
+  ws.onEvent(onEvent);
+  server.addHandler(&ws);
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", ws.count() == 0 ? html_index : html_busy);
+  });
+}
+
+void handleWebSocketMessage(uint32_t client, void *arg, uint8_t *data, size_t length) {
+  AwsFrameInfo *info = (AwsFrameInfo*)arg;
+
+  if(info->final && info->index == 0 && info->len == length && info->opcode == WS_TEXT){
+    data[length] = 0;
+
+    if(strstr((char*)data, ALIAS_VELOCIDADE)){
+      StaticJsonDocument<JSON_OBJECT_SIZE(2)> json;
+      deserializeJson(json, data);
+
+      int16_t angulo = json[ALIAS_ANGULO];
+      int16_t velocidade = json[ALIAS_VELOCIDADE];
+
+      if(angulo >= 90 && angulo <= 180)
+        motores.turn(velocidade * (135 - angulo) / 45, velocidade);
+      else if(angulo >= 0 && angulo < 90)
+        motores.turn(velocidade, velocidade * (angulo - 45) / 45);
+      else if(angulo > 180 && angulo <= 270)
+        motores.turn(-velocidade, -velocidade * (angulo - 225) / 45);
+      else if(angulo > 270)
+        motores.turn(-velocidade * (315 - angulo) / 45, -velocidade);
+      else
+        motores.stop();
+    }
+    else if(strstr((char*)data, ALIAS_SERVO)){
+      StaticJsonDocument<JSON_OBJECT_SIZE(2)> json;
+      deserializeJson(json, data);
+
+      int16_t angulo = json[ALIAS_POSICAO];
+      int16_t servo = json[ALIAS_SERVO];
+
+      if(servo == 3 || servo == 4){
+        angulo = abs(angulo - 180);
+      }
+
+      if(servo >= 1 && servo <= 4){
+        if(angulo >= sangulos[servo-1].min && angulo <= sangulos[servo-1].max){
+          servos[servo-1].write(angulo);
+        }
+      }
+    }
+  }
+}
+
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
+             void *arg, uint8_t *data, size_t length) {
+  if(type == WS_EVT_CONNECT){
+    digitalWrite(PIN_LED, HIGH);
+    if(ws.count() > 1){
+      ws.close(client->id());
+    }
+  }
+  else if(type == WS_EVT_DISCONNECT){
+    if(ws.count() == 0){
+      digitalWrite(PIN_LED, LOW);
+      habilitar_reset_motores = true;
+    }
+  }
+  else if(type == WS_EVT_DATA){
+    handleWebSocketMessage(client->id(), arg, data, length);
+  }
+}
