@@ -1,0 +1,34 @@
+//declaracao dos pinos conectados aos sensores
+const int SENSOR_LINHA_ESQUERDO = 36;
+const int SENSOR_LINHA_DIREITO = 39;
+
+//declaracao das variaveis que armazenam as leituras
+int leitura_esquerdo = 0;
+int leitura_direito = 0;
+
+void setup() {
+
+  //inicializacao da comunicacao serial
+  Serial.begin(115200);
+
+  //configuracao dos pinos conectados aos sensores como entradas
+  pinMode(SENSOR_LINHA_ESQUERDO, INPUT);
+  pinMode(SENSOR_LINHA_DIREITO, INPUT);
+
+}
+
+void loop() {
+
+  //armazena as leituras analogicas dos sensores nas respectivas variaveis
+  leitura_esquerdo = analogRead(SENSOR_LINHA_ESQUERDO);
+  leitura_direito = analogRead(SENSOR_LINHA_DIREITO);
+
+  //exibe os valores no monitor serial
+  Serial.print("Valor lido na esquerda: ");
+  Serial.print(leitura_esquerdo);
+  Serial.print(" | na direita: ");
+  Serial.println(leitura_direito);
+
+  delay(100); //aguarda 100 ms para nova leitura
+
+}
