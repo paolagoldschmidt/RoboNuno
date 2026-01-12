@@ -1,0 +1,142 @@
+* Monte um circuito com a fita isolante preta 
+ * em uma superficie branca e coloque o robo sobre a linha
+ * desta pista. O robo ira andar sempre sobre a linha e, caso 
+ * ele saia da pista, ele se mantera parado.
+ * 
+ * O robo tambem fica constantemente medindo a distancia do
+ * sensor ultrassonico para verificar se ha algum obstaculo na pista. 
+ * Quando a distancia for menor que a distancia de obstaculo 
+ * configurada, o robo ira girar para a direita ou para a esquerda, 
+ * desviando e contornando o obstaculo, para voltar para a pista.
+********************************************************
+
+#include <RoboCore_Vespa.h>
+#include <NewPing.h>
+
+VespaMotors motores;
+
+const int SENSOR_LINHA_ESQUERDO = 36;
+const int SENSOR_LINHA_DIREITO = 39;
+
+int leitura_esquerdo = 0;
+int leitura_direito = 0;
+
+const int LEITURA_LINHA = 3000;
+const int VELOCIDADE = 80;
+const int VELOCIDADE_SOMA = 20;
+const int VELOCIDADE_SUBTRACAO = 50;
+const int CONTAGEM_MAXIMA = 100;
+
+int contador_parada = 0;
+
+const int PINO_TRIGGER = 25;
+const int PINO_ECHO = 26;
+const int DISTANCIA_OBSTACULO = 7;
+const int DISTANCIA_MAXIMA = 300;
+const int ESPERA = 30;
+const int ESPERA_MOVIMENTO = 400;
+
+int distancia;
+
+NewPing sensor_ultrassonico(PINO_TRIGGER, PINO_ECHO, DISTANCIA_MAXIMA);
+
+void setup() {
+  pinMode(SENSOR_LINHA_ESQUERDO, INPUT);
+  pinMode(SENSOR_LINHA_DIREITO, INPUT);
+}
+
+void loop() {
+  seguidor_linha();
+  anticolisao();
+}
+
+void seguidor_linha() {
+  leitura_esquerdo = analogRead(SENSOR_LINHA_ESQUERDO);
+  leitura_direito = analogRead(SENSOR_LINHA_DIREITO);
+
+  if ((leitura_esquerdo > LEITURA_LINHA) && (leitura_direito > LEITURA_LINHA)) {
+    motores.forward(VELOCIDADE);
+    contador_parada = 0;
+  }
+  else if ((leitura_esquerdo < LEITURA_LINHA) && (leitura_direito < LEITURA_LINHA)) {
+    contador_parada++;
+  }
+  else if (leitura_direito > LEITURA_LINHA) {
+    motores.turn(VELOCIDADE + VELOCIDADE_SOMA, VELOCIDADE - VELOCIDADE_SUBTRACAO);
+    contador_parada = 0;
+  }
+  else if (leitura_esquerdo > LEITURA_LINHA) {
+    motores.turn(VELOCIDADE - VELOCIDADE_SUBTRACAO, VELOCIDADE + VELOCIDADE_SOMA);
+    contador_parada = 0;
+  }
+
+  if (contador_parada >= CONTAGEM_MAXIMA) {
+    motores.stop();
+  }
+}
+
+void anticolisao() {
+  delay(ESPERA);
+  distancia = sensor_ultrassonico.ping() / 58;
+
+  if (distancia <= DISTANCIA_OBSTACULO && distancia != 0) {
+    delay(ESPERA);
+    distancia = sensor_ultrassonico.ping() / 58;
+
+    if (distancia <= DISTANCIA_OBSTACULO && distancia != 0) {
+      motores.stop();
+      motores.backward(VELOCIDADE);
+      delay(ESPERA_MOVIMENTO / 2);
+      motores.stop();
+
+      if (millis() % 2 == 0) {
+        motores.turn(VELOCIDADE, -VELOCIDADE);
+        delay(ESPERA_MOVIMENTO);
+        motores.stop();
+        distancia = sensor_ultrassonico.ping() / 58;
+
+        while (distancia <= DISTANCIA_OBSTACULO && distancia != 0) {
+          motores.turn(VELOCIDADE, -VELOCIDADE);
+          delay(ESPERA);
+          distancia = sensor_ultrassonico.ping() / 58;
+        }
+
+        motores.forward(VELOCIDADE);
+        delay(ESPERA_MOVIMENTO * 2);
+        motores.stop();
+        motores.turn(-VELOCIDADE, VELOCIDADE);
+        delay(ESPERA_MOVIMENTO);
+        motores.forward(VELOCIDADE);
+        delay(ESPERA_MOVIMENTO * 2);
+        motores.stop();
+        motores.turn(-VELOCIDADE, VELOCIDADE);
+        delay(ESPERA_MOVIMENTO * 1.5);
+        motores.forward(VELOCIDADE);
+
+      } else {
+        motores.turn(-VELOCIDADE, VELOCIDADE);
+        delay(ESPERA_MOVIMENTO);
+        motores.stop();
+        distancia = sensor_ultrassonico.ping() / 58;
+
+        while (distancia <= DISTANCIA_OBSTACULO && distancia != 0) {
+          motores.turn(-VELOCIDADE, VELOCIDADE);
+          delay(ESPERA);
+          distancia = sensor_ultrassonico.ping() / 58;
+        }
+
+        motores.forward(VELOCIDADE);
+        delay(ESPERA_MOVIMENTO * 2);
+        motores.stop();
+        motores.turn(VELOCIDADE, -VELOCIDADE);
+        delay(ESPERA_MOVIMENTO);
+        motores.forward(VELOCIDADE);
+        delay(ESPERA_MOVIMENTO * 2);
+        motores.stop();
+        motores.turn(VELOCIDADE, -VELOCIDADE);
+        delay(ESPERA_MOVIMENTO * 1.5);
+        motores.forward(VELOCIDADE);
+      }
+    }
+  }
+}
