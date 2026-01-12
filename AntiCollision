@@ -1,19 +1,72 @@
+* O robo fica constantemente medindo a distancia do
+ * sensor ultrassonico e, quando a distancia for menor que 
+ * a distancia de obstaculo configurada, o robo ira girar
+ * para a direita ou para a esquerda, desviando do 
+ * obstaculo e voltando a andar para frente.
+********************************************************
+
+
+
+#include <RoboCore_Vespa.h>
+
+VespaMotors motores;
+
 const int PINO_TRIGGER = 25;
 const int PINO_ECHO = 26;
+const int DISTANCIA_OBSTACULO = 25;
+const int VELOCIDADE = 80;
+const int ESPERA = 60;
+const int ESPERA_MOVIMENTO = 250;
+
+int distancia;
 
 void setup() {
-  Serial.begin(115200);
   pinMode(PINO_TRIGGER, OUTPUT);
   pinMode(PINO_ECHO, INPUT);
   digitalWrite(PINO_TRIGGER, LOW);
 }
 
 void loop() {
-  int distancia = sensor_ultrassonico(PINO_TRIGGER, PINO_ECHO);
-  Serial.print("Distancia: ");
-  Serial.print(distancia);
-  Serial.println(" cm");
-  delay(100);
+  delay(ESPERA);
+  distancia = sensor_ultrassonico(PINO_TRIGGER, PINO_ECHO);
+
+  if (distancia <= DISTANCIA_OBSTACULO) {
+    delay(ESPERA);
+    distancia = sensor_ultrassonico(PINO_TRIGGER, PINO_ECHO);
+
+    if (distancia <= DISTANCIA_OBSTACULO) {
+      motores.stop();
+      motores.backward(VELOCIDADE);
+      delay(ESPERA_MOVIMENTO);
+      motores.stop();
+
+      if (millis() % 2 == 0) {
+        motores.turn(VELOCIDADE, -VELOCIDADE);
+        delay(ESPERA_MOVIMENTO);
+        motores.stop();
+        distancia = sensor_ultrassonico(PINO_TRIGGER, PINO_ECHO);
+
+        while (distancia <= DISTANCIA_OBSTACULO) {
+          motores.turn(VELOCIDADE, -VELOCIDADE);
+          delay(ESPERA);
+          distancia = sensor_ultrassonico(PINO_TRIGGER, PINO_ECHO);
+        }
+      } else {
+        motores.turn(-VELOCIDADE, VELOCIDADE);
+        delay(ESPERA_MOVIMENTO);
+        motores.stop();
+        distancia = sensor_ultrassonico(PINO_TRIGGER, PINO_ECHO);
+
+        while (distancia <= DISTANCIA_OBSTACULO) {
+          motores.turn(-VELOCIDADE, VELOCIDADE);
+          delay(ESPERA);
+          distancia = sensor_ultrassonico(PINO_TRIGGER, PINO_ECHO);
+        }
+      }
+    }
+  } else {
+    motores.forward(VELOCIDADE);
+  }
 }
 
 int sensor_ultrassonico(int pinotrigger, int pinoecho) {
