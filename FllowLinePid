@@ -1,0 +1,157 @@
+//adiciona a biblioteca de controle de motores ao codigo
+#include <RoboCore_Vespa.h>
+
+//declaracao do objeto "motores"
+VespaMotors motores;
+
+//declaracao dos pinos conectados aos sensores de linha
+const int SENSOR_LINHA_ESQUERDO = 36;
+const int SENSOR_LINHA_DIREITO = 39;
+
+//declaracao das variavels que armazenam as leituras dos sensores
+int leitura_esquerdo = 0;
+int leitura_direito = 0;
+
+//declaracao da variavel que armazena o valor de corte para as leituras dos sensores
+const int LEITURA_LINHA = 3000;
+//declaracao da variavel que armazena a velocidade inicial do robo
+const int VELOCIDADE = 70;
+//declaracao das variaveis que armazenam as velocidades maxima e minima dos motores
+const int VELOCIDADE_MAXIMA = 100;
+const int VELOCIDADE_MINIMA = 0;
+//declaracao das variaveis que receberao as velocidades de cada motor
+int velocidade_direita;
+int velocidade_esquerda;
+
+//declaracao da variavel que armazena o valor maximo de contagem de parada
+const int CONTAGEM_MAXIMA = 5000;
+//declaracao da variavel do contador para parar o robo caso ele fuja da pista
+int contador_parada = 0;
+
+//declaracao da variavel que armazena o intervalo de espera entre repetições do codigo
+const int espera = 10;
+//declaracao das variaveis que armazenam os ganhos do calculo do controle PID
+float Kp = 6;
+float Ki = 0.2;
+float Kd = 20;
+//declaracao das variaveis para o calculo do controle PID
+float erro = 0.0;
+float P = 0.0;
+float I = 0.0;
+float D = 0.0;
+float erro_anterior = 0.0;
+//declaracao da variavel que recebera o valor calculado do controle PID
+float resposta_PID = 0.0;
+
+void setup() {
+
+  //configuracao dos pinos conectados aos sensores como entradas
+  pinMode(SENSOR_LINHA_ESQUERDO, INPUT);
+  pinMode(SENSOR_LINHA_DIREITO, INPUT);
+
+}
+
+void loop(){
+  
+  //realiza a leitura dos sensores
+  leitura_esquerdo = analogRead(SENSOR_LINHA_ESQUERDO);
+  leitura_direito = analogRead(SENSOR_LINHA_DIREITO);
+
+  //verifica se ambas as leituras dos sensores sao maiores que o valor de leitura de corte
+  //ou seja se os dois sensores estao sobre a linha da pista
+  if((leitura_esquerdo > LEITURA_LINHA) && (leitura_direito > LEITURA_LINHA)) { //se for verdadeiro
+    //atualiza o erro do sistema e calcula a resposta PID
+    erro = 0.0;
+    calcula_PID();
+    //aciona os motores com as suas respectivas velocidades
+    motores.turn(velocidade_direita, velocidade_esquerda);
+    contador_parada = 0; //zera o contador de parada
+  }
+
+  //verifica se ambas as leituras dos sensores sao menores que o valor de leitura de corte
+  //ou seja se os dois sensores estao fora da linha da pista
+  else if((leitura_esquerdo < LEITURA_LINHA) && (leitura_direito < LEITURA_LINHA)){//se for verdadeiro
+    contador_parada++; //incrementa o contador de parada
+    //verifica se o erro anterior e igual a 1.0, ou seja, se o robô estava apenas com o sensor direito sobre a linha antes de sair completamente
+    if(erro == 1.0){
+      //atualiza o erro do sistema e calcula a resposta PID
+      erro = 2.0;
+      calcula_PID();
+      //aciona os motores com as suas respectivas velocidades
+      motores.turn(velocidade_direita, velocidade_esquerda);
+      //senao, verifica se o erro anterior e igual a 1.0, ou seja, se o robô estava apenas com o sensor direito sobre a linha antes de sair completamente
+    } else if(erro == -1.0){
+      //atualiza o erro do sistema e calcula a resposta PID
+      erro = -2.0;
+      calcula_PID();
+      //aciona os motores com as suas respectivas velocidades
+      motores.turn(velocidade_direita, velocidade_esquerda);
+    }
+    
+  }
+
+  //verifica se apenas a leitura do sensor da direita e menor que o valor de leitura de corte
+  //ou seja se apenas o sensor da direta esta sobre a linha da pista
+  else if(leitura_direito > LEITURA_LINHA) { //se for verdadeiro
+    //atualiza o erro do sistema e calcula a resposta PID
+    erro = 1.0;
+    calcula_PID();
+    //aciona os motores com as suas respectivas velocidades
+    motores.turn(velocidade_direita, velocidade_esquerda);
+    contador_parada = 0; //zera o contador de parada
+  }
+
+  //verifica se apenas a leitura do sensor da esquerda e menor que o valor de leitura de corte
+  //ou seja se apenas o sensor da esquerda esta sobre a linha da pista
+  else if(leitura_esquerdo > LEITURA_LINHA) {
+    //atualiza o erro do sistema e calcula a resposta PID
+    erro = -1.0;
+    calcula_PID();
+    //aciona os motores com as suas respectivas velocidades
+    motores.turn(velocidade_direita, velocidade_esquerda);
+    contador_parada = 0; //zera o contador de parada
+  }
+
+  //verifica se o contador de parada e maior ou igual que o valor de contagem maxima
+  //ou seja se o robo ficou muito tempo fora da pista
+  if(contador_parada >= CONTAGEM_MAXIMA){ //se for verdadeiro
+    motores.stop(); //para o robo
+    P = 0;
+    I = 0;
+    D = 0;
+    contador_parada = CONTAGEM_MAXIMA; //atualiza a contagem de parada
+  }
+
+  //realiza um tempo de espera na execucao do codigo
+  delay(espera); //altere esse valor caso queira diminuir a sensibilidade do robo
+}
+
+//funcao de calculo do controle PID
+void calcula_PID(){
+  P = erro; //atualiza o valor proporcional do calculo
+  I = I + erro; //atualiza o valor integral do calculo
+  D = erro - erro_anterior; //atualiza o valor derivativo do calculo
+  resposta_PID = (Kp * P) + (Ki * I) + (Kd * D); //realiza o calculo da resposta do controle PID
+  erro_anterior = erro; //atualiza o valor do erro anterior
+
+  //calcula as respectivas velocidades dos motores com o valor calculado do controle PID
+  velocidade_direita = VELOCIDADE + resposta_PID;
+  velocidade_esquerda = VELOCIDADE - resposta_PID;
+
+  //verifica se o valor da velocidade do motor direito e maior que a velocidade maxima dos motores
+  if(velocidade_direita > VELOCIDADE_MAXIMA){ //se for verdadeiro
+    velocidade_direita = VELOCIDADE_MAXIMA; //mantem o valor sendo igual a velocidade maxima dos motores
+  } 
+  //senao, verifica se o valor da velocidade do motor direito e menor que a velocidade minima dos motores
+  else if(velocidade_direita < VELOCIDADE_MINIMA){ //se for verdadeiro
+    velocidade_direita = VELOCIDADE_MINIMA; //mantem o valor sendo igual a velocidade minima dos motores
+  }
+  //verifica se o valor da velocidade do motor esquerdo e maior que a velocidade maxima dos motores
+  if(velocidade_esquerda > VELOCIDADE_MAXIMA){ //se for verdadeiro
+    velocidade_esquerda = VELOCIDADE_MAXIMA; //mantem o valor sendo igual a velocidade maxima dos motores
+  } 
+  //senao, verifica se o valor da velocidade do motor esquerdo e menor que a velocidade minima dos motores
+  else if(velocidade_esquerda < VELOCIDADE_MINIMA){ //se for verdadeiro
+    velocidade_esquerda = VELOCIDADE_MINIMA; //mantem o valor sendo igual a velocidade minima dos motores
+  }
+}
