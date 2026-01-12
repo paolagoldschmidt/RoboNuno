@@ -1,0 +1,24 @@
+const int PINO_TRIGGER = 25;
+const int PINO_ECHO = 26;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(PINO_TRIGGER, OUTPUT);
+  pinMode(PINO_ECHO, INPUT);
+  digitalWrite(PINO_TRIGGER, LOW);
+}
+
+void loop() {
+  int distancia = sensor_ultrassonico(PINO_TRIGGER, PINO_ECHO);
+  Serial.print("Distancia: ");
+  Serial.print(distancia);
+  Serial.println(" cm");
+  delay(100);
+}
+
+int sensor_ultrassonico(int pinotrigger, int pinoecho) {
+  digitalWrite(pinotrigger, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(pinotrigger, LOW);
+  return pulseIn(pinoecho, HIGH) / 58;
+}
